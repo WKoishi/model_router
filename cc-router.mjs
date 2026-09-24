@@ -13,6 +13,9 @@ const HOST = process.env.HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT) || 4000;
 const DEFAULT_MATCH = "sonnet-5";
 
+// 只接受以本机地址访问的请求，防止 DNS rebinding 让外部网页借用本代理
+const ALLOWED_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", HOST.toLowerCase()]);
+
 // 逐跳头只对当前这一段连接有意义，不能转发
 const HOP_BY_HOP = new Set([
   "connection", "keep-alive", "proxy-connection", "transfer-encoding",
@@ -68,6 +71,11 @@ async function handle(req, res) {
   const started = Date.now();
   const h = req.headers;
 
+  const hostname = (h.host || "").replace(/:\d+$/, "").toLowerCase();
+  if (!ALLOWED_HOSTS.has(hostname)) {
+    return fail(res, 403, `拒绝非本机 Host：${h.host || "(空)"}`);
+  }
+
   if (!h["x-router-main-url"] || !h["x-router-cheap-url"] || !h["x-router-cheap-key"]) {
     return fail(res, 400,
       "缺少 x-router-main-url / x-router-cheap-url / x-router-cheap-key 请求头，" +
@@ -75,10 +83,14 @@ async function handle(req, res) {
   }
 
   let mainUrl, cheapUrl, matchRe;
+  const cheapAuth = (h["x-router-cheap-auth"] || "").toLowerCase();
   try {
     mainUrl = parseUrl(h["x-router-main-url"], "x-router-main-url");
     cheapUrl = parseUrl(h["x-router-cheap-url"], "x-router-cheap-url");
     matchRe = new RegExp(h["x-router-cheap-match"] || DEFAULT_MATCH);
+    if (cheapAuth && cheapAuth !== "bearer" && cheapAuth !== "x-api-key") {
+      throw new Error(`x-router-cheap-auth 只能是 bearer 或 x-api-key：${h["x-router-cheap-auth"]}`);
+    }
   } catch (e) {
     return fail(res, 400, e.message);
   }
@@ -108,7 +120,7 @@ async function handle(req, res) {
 
   if (toCheap) {
     // 鉴权方式默认与 Claude Code 发来的一致，可用 x-router-cheap-auth 覆盖
-    const style = h["x-router-cheap-auth"] || ("authorization" in h ? "bearer" : "x-api-key");
+    const style = cheapAuth || ("authorization" in h ? "bearer" : "x-api-key");
     if (style === "bearer") headers["authorization"] = `Bearer ${h["x-router-cheap-key"]}`;
     else headers["x-api-key"] = h["x-router-cheap-key"];
 
@@ -124,26 +136,35 @@ async function handle(req, res) {
   const target = new URL(base.href.replace(/\/+$/, "") + req.url);
   const client = target.protocol === "https:" ? https : http;
 
+  const tag = [req.method, req.url, `model=${model || "-"}`, `-> ${route}`];
+  let clientGone = false;
+  let upstreamFailed = false;
+
   const upReq = client.request(target, { method: req.method, headers }, (upRes) => {
     const outHeaders = copyHeaders(upRes.rawHeaders, (name) => HOP_BY_HOP.has(name));
     res.writeHead(upRes.statusCode, upRes.statusMessage, outHeaders);
-    log(req.method, req.url, `model=${model || "-"}`, `-> ${route}`,
-      upRes.statusCode, `${Date.now() - started}ms`);
+    log(...tag, upRes.statusCode, `${Date.now() - started}ms`);
+    upRes.on("error", () => { if (!clientGone) upstreamFailed = true; });
     pipeline(upRes, res, (err) => {
-      if (err && err.code !== "ERR_STREAM_PREMATURE_CLOSE") {
+      if (err && !clientGone && err.code !== "ERR_STREAM_PREMATURE_CLOSE") {
         log("响应转发中断:", err.message);
       }
     });
   });
 
   upReq.on("error", (err) => {
-    log(req.method, req.url, `model=${model || "-"}`, `-> ${route}`, "上游错误:", err.message);
+    // 客户端取消导致的上游中断已在 close 中记录，不算上游错误
+    if (clientGone) return;
+    log(...tag, "上游错误:", err.message);
     fail(res, 502, `上游（${route}）请求失败：${err.message}`);
   });
 
   // Claude Code 中途断开时，同时取消上游请求
   res.on("close", () => {
-    if (!res.writableFinished) upReq.destroy();
+    if (res.writableFinished || upstreamFailed) return;
+    clientGone = true;
+    log(...tag, "客户端已取消", `${Date.now() - started}ms`);
+    upReq.destroy();
   });
 
   upReq.end(body);

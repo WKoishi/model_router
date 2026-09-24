@@ -5,6 +5,10 @@
 典型用途：Claude Code 在 auto 模式下会调用 Sonnet 5 做安全检查（classifier），调用量不小。
 用本代理可以把 Sonnet 5 的请求单独发往更便宜的上游，其余请求仍走原来的上游。
 
+> 注意：分流只看模型名，默认会把**所有** Sonnet 5 请求发往上游 B，而不只是安全检查。
+> 如果主会话切换到 Sonnet 5（如 `/model sonnet`）或子代理使用 Sonnet 5，这些请求同样会走上游 B。
+> 可以用 `x-router-cheap-match` 调整匹配规则。
+
 ```
 Claude Code ──► http://127.0.0.1:4000 (cc-router)
                    ├─ model 匹配 sonnet-5 ──► 上游 B（cheap）
@@ -16,6 +20,7 @@ Claude Code ──► http://127.0.0.1:4000 (cc-router)
 - **不保存任何密钥或地址**：所有配置都写在 `~/.claude/settings.json`，由 Claude Code 以请求头形式传给代理，本仓库不含任何隐私信息。
 - **原样转发**：请求体逐字节透传（thinking 签名、`cache_control` 等不受影响）；请求头保留原始大小写与顺序；响应不解压、不重新编码，流式输出（SSE）实时转发。
 - **仅监听 `127.0.0.1`**：局域网内其他机器无法访问。
+- **校验 `Host` 头**：只接受 `127.0.0.1` / `localhost` / `[::1]` 访问，防止外部网页通过 DNS rebinding 借用本代理。
 - 所有 `x-router-*` 配置头在转发前剥离，不会泄露给任何上游。
 
 ## 环境要求
@@ -50,7 +55,7 @@ node -v
 | `x-router-main-url` | 是 | 上游 A 的基础地址，如 `https://api.anthropic.com` |
 | `x-router-cheap-url` | 是 | 上游 B 的基础地址 |
 | `x-router-cheap-key` | 是 | 上游 B 的 API key |
-| `x-router-cheap-auth` | 否 | 上游 B 的鉴权方式：`bearer` 或 `x-api-key`。默认与 Claude Code 发给上游 A 的方式相同 |
+| `x-router-cheap-auth` | 否 | 上游 B 的鉴权方式：`bearer` 或 `x-api-key`（不区分大小写，其他值会报错）。默认与 Claude Code 发给上游 A 的方式相同 |
 | `x-router-cheap-match` | 否 | 匹配模型名的正则，默认 `sonnet-5` |
 | `x-router-cheap-model` | 否 | 发往上游 B 时把 `model` 改写成此值（上游 B 对模型的命名不同时使用）。设置后请求体会被重新序列化，不再逐字节透传 |
 
@@ -95,9 +100,20 @@ node cc-router.mjs
 ```
 2026-09-24T13:21:39.442Z POST /v1/messages model=claude-opus-5-5 -> main 200 7ms
 2026-09-24T13:21:39.450Z POST /v1/messages model=claude-sonnet-5 -> cheap 200 1ms
+2026-09-24T13:21:41.013Z POST /v1/messages model=claude-opus-5-5 -> main 客户端已取消 1571ms
 ```
 
+在 Claude Code 中按 Esc 中断请求时会记录「客户端已取消」，同时取消对应的上游请求，这不是错误。
+
 日志只记录方法、路径、模型名、去向、状态码和耗时，不记录任何 key 或请求内容。
+
+## 测试
+
+```bash
+node --test          # Node 18/20 使用：node --test test/
+```
+
+测试会在随机端口启动代理和一个本地假上游，不访问任何真实上游，也不需要任何 key。
 
 ## 故障排查
 
@@ -106,6 +122,8 @@ node cc-router.mjs
 | Claude Code 报连接失败 | 代理没有运行，检查 `systemctl --user status cc-router` |
 | 返回 `[cc-router] 缺少 x-router-...` | `ANTHROPIC_CUSTOM_HEADERS` 没配置或没生效（改完需重启 Claude Code） |
 | 返回 `[cc-router] ... 不是合法的 URL` | 地址写错，需带 `https://` 前缀 |
+| 返回 `[cc-router] x-router-cheap-auth 只能是 ...` | `x-router-cheap-auth` 的值写错，只能是 `bearer` 或 `x-api-key` |
+| 返回 403 `[cc-router] 拒绝非本机 Host` | `ANTHROPIC_BASE_URL` 没用本机地址，应为 `http://127.0.0.1:4000` 或 `http://localhost:4000` |
 | 返回 `[cc-router] 上游（main/cheap）请求失败` | 对应上游网络不通或地址错误 |
 | 上游返回 401 | 对应上游的 key 错误，或鉴权方式不对（可设置 `x-router-cheap-auth`） |
 

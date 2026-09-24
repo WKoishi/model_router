@@ -70,11 +70,27 @@ async function waitForLog(re, timeout = 3000) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function routerHeaders(extra = {}) {
+// 构造 x-router 头的值；opts 覆盖默认配置项，值为 undefined 的项不写入
+function routerValue(opts = {}) {
+  const cfg = {
+    main: `http://127.0.0.1:${upPort}/main`,
+    cheap: `http://127.0.0.1:${upPort}/cheap`,
+    key: "CHEAPKEY",
+    ...opts,
+  };
+  return Object.entries(cfg)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${k}=${v}`)
+    .join("; ");
+}
+
+function routerHeaders(opts = {}, extra = {}) {
+  return rawRouterHeaders(routerValue(opts), extra);
+}
+
+function rawRouterHeaders(value, extra = {}) {
   return {
-    "x-router-main-url": `http://127.0.0.1:${upPort}/main`,
-    "x-router-cheap-url": `http://127.0.0.1:${upPort}/cheap`,
-    "x-router-cheap-key": "CHEAPKEY",
+    "x-router": value,
     "authorization": "Bearer MAINKEY",
     "content-type": "application/json",
     ...extra,
@@ -158,30 +174,39 @@ test("分流：sonnet-5 走 cheap，其余走 main，非 JSON 走 main", async (
   assert.equal(r.json.body, "not json");
 });
 
-test("头处理：x-router-* 被剥离，main key 不泄给 cheap", async () => {
+test("头处理：x-router 被剥离，两个上游的 key 互不泄露", async () => {
   let r = await send({ body: modelBody("claude-sonnet-5") });
   assert.equal(r.json.headers.authorization, "Bearer CHEAPKEY");
-  assert.ok(!Object.keys(r.json.headers).some((k) => k.startsWith("x-router-")));
+  assert.ok(!Object.keys(r.json.headers).some((k) => k.startsWith("x-router")));
+  assert.ok(!JSON.stringify(r.json.headers).includes("MAINKEY"));
 
   r = await send({ body: modelBody("claude-opus-5-5") });
   assert.equal(r.json.headers.authorization, "Bearer MAINKEY");
-  assert.ok(!Object.keys(r.json.headers).some((k) => k.startsWith("x-router-")));
+  assert.ok(!Object.keys(r.json.headers).some((k) => k.startsWith("x-router")));
   assert.ok(!JSON.stringify(r.json.headers).includes("CHEAPKEY"));
 });
 
-test("请求体：默认逐字节透传；设置 cheap-model 时改写 model", async () => {
+test("请求体：默认逐字节透传；设置 model 项时改写 model", async () => {
   const raw = '{"model":"claude-sonnet-5",  "x": 1.0}';
   let r = await send({ body: raw });
   assert.equal(r.json.body, raw);
 
-  r = await send({ headers: routerHeaders({ "x-router-cheap-model": "other" }), body: raw });
+  r = await send({ headers: routerHeaders({ model: "other" }), body: raw });
   assert.equal(JSON.parse(r.json.body).model, "other");
   assert.equal(r.json.headers["content-length"], String(Buffer.byteLength(r.json.body)));
 });
 
-// ---------- x-router-cheap-auth ----------
+test("match 项：自定义匹配规则", async () => {
+  const headers = routerHeaders({ match: "^claude-opus" });
+  let r = await send({ headers, body: modelBody("claude-opus-5-5") });
+  assert.equal(r.json.url, "/cheap/v1/messages");
+  r = await send({ headers, body: modelBody("claude-sonnet-5") });
+  assert.equal(r.json.url, "/main/v1/messages");
+});
 
-test("cheap-auth：未设置时沿用 Claude Code 的鉴权方式", async () => {
+// ---------- auth 项 ----------
+
+test("auth：未设置时沿用 Claude Code 的鉴权方式", async () => {
   let r = await send({ body: modelBody("claude-sonnet-5") });
   assert.equal(r.json.headers.authorization, "Bearer CHEAPKEY");
   assert.equal(r.json.headers["x-api-key"], undefined);
@@ -192,29 +217,123 @@ test("cheap-auth：未设置时沿用 Claude Code 的鉴权方式", async () => 
   assert.equal(r.json.headers.authorization, undefined);
 });
 
-test("cheap-auth：取值不区分大小写", async () => {
+test("auth：取值不区分大小写", async () => {
   for (const v of ["bearer", "Bearer", "BEARER"]) {
-    const r = await send({ headers: routerHeaders({ "x-router-cheap-auth": v }), body: modelBody("claude-sonnet-5") });
+    const r = await send({ headers: routerHeaders({ auth: v }), body: modelBody("claude-sonnet-5") });
     assert.equal(r.json.headers.authorization, "Bearer CHEAPKEY", v);
     assert.equal(r.json.headers["x-api-key"], undefined, v);
   }
   for (const v of ["x-api-key", "X-Api-Key", "X-API-KEY"]) {
-    const r = await send({ headers: routerHeaders({ "x-router-cheap-auth": v }), body: modelBody("claude-sonnet-5") });
+    const r = await send({ headers: routerHeaders({ auth: v }), body: modelBody("claude-sonnet-5") });
     assert.equal(r.json.headers["x-api-key"], "CHEAPKEY", v);
     assert.equal(r.json.headers.authorization, undefined, v);
   }
 });
 
-test("cheap-auth：非法取值返回 400，且不访问上游", async () => {
+test("auth：非法取值返回 400，且不访问上游", async () => {
   const before = upstreamEvents.length;
   for (const v of ["apikey", "api-key", "basic", "bearer-token"]) {
     for (const model of ["claude-sonnet-5", "claude-opus-5-5"]) {
-      const r = await send({ headers: routerHeaders({ "x-router-cheap-auth": v }), body: modelBody(model) });
+      const r = await send({ headers: routerHeaders({ auth: v }), body: modelBody(model) });
       assert.equal(r.status, 400, `${v} / ${model}`);
-      assert.match(r.json.error.message, /x-router-cheap-auth 只能是 bearer 或 x-api-key/);
+      assert.match(r.json.error.message, /auth 只能是 bearer 或 x-api-key/);
     }
   }
   assert.equal(upstreamEvents.length, before);
+});
+
+// ---------- x-router 格式 ----------
+
+test("格式：容忍多余空格、空项、末尾分号和名称大小写", async () => {
+  const value = ` Main = http://127.0.0.1:${upPort}/main ;;cheap=http://127.0.0.1:${upPort}/cheap;` +
+    ` KEY=CHEAPKEY; Auth=X-Api-Key; `;
+  const r = await send({ headers: rawRouterHeaders(value), body: modelBody("claude-sonnet-5") });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.url, "/cheap/v1/messages");
+  assert.equal(r.json.headers["x-api-key"], "CHEAPKEY");
+});
+
+test("格式：值中的 =、: 以及地址里的 x-router、?key= 字样不影响解析", async () => {
+  let r = await send({ headers: routerHeaders({ key: "K=E=Y" }), body: modelBody("claude-sonnet-5") });
+  assert.equal(r.json.headers.authorization, "Bearer K=E=Y");
+
+  r = await send({
+    headers: routerHeaders({ main: `http://127.0.0.1:${upPort}/x-router-a:b` }),
+    body: modelBody("claude-opus-5-5"),
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.url, "/x-router-a:b/v1/messages");
+
+  r = await send({
+    headers: routerHeaders({ main: `http://127.0.0.1:${upPort}/main?key=1&auth=2` }),
+    body: modelBody("claude-opus-5-5"),
+  });
+  assert.equal(r.status, 200);
+});
+
+test("格式：配置可拆到多个 x-router 头中", async () => {
+  const r = await send({
+    headers: rawRouterHeaders([
+      `main=http://127.0.0.1:${upPort}/main; cheap=http://127.0.0.1:${upPort}/cheap`,
+      "key=CHEAPKEY",
+    ]),
+    body: modelBody("claude-sonnet-5"),
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.headers.authorization, "Bearer CHEAPKEY");
+});
+
+// ---------- 配置错误的提示 ----------
+
+test("配置错误：返回 400 并指明原因，不访问上游，且错误信息不含 key", async () => {
+  const main = `main=http://127.0.0.1:${upPort}/main`;
+  const cheap = `cheap=http://127.0.0.1:${upPort}/cheap`;
+  const cases = [
+    // 拼错名称、缺少 =、重复
+    [rawRouterHeaders(`${main}; ${cheap}; kye=SECRET`), /无法识别的项「kye」/],
+    [rawRouterHeaders(`${main}; ${cheap}; SECRET`), /第 3 项缺少 =/],
+    [rawRouterHeaders(`${main}; ${cheap}; key: SECRET`), /第 3 项缺少 =/],
+    [rawRouterHeaders(`${main}; ${cheap}; key=SECRET; key=SECRET2`), /key 重复配置/],
+    [rawRouterHeaders(`${main}; ${cheap}; key=SECRET; constructor=x`), /无法识别的项「constructor」/],
+    // 缺少必填项
+    [rawRouterHeaders(`${main}; key=SECRET`), /缺少配置 cheap/],
+    [rawRouterHeaders(`${main}; ${cheap}; key=`), /缺少配置 key/],
+    // 分隔符用错
+    [rawRouterHeaders(`${main}, ${cheap}, key=SECRET`), /main 的值中混入了其他配置项：各项之间要用 ; 分隔/],
+    [rawRouterHeaders(`${main} ${cheap} key=SECRET`), /main 的值中混入了其他配置项/],
+    [rawRouterHeaders(`${main}\\n${cheap}\\nkey=SECRET`), /x-router 的值中含有 \\n/],
+    // 地址写错（错误信息不回显值）
+    [rawRouterHeaders(`main=SECRET; ${cheap}; key=k`), /main 不是合法的 URL/],
+    [rawRouterHeaders(`main=ftp://SECRET; ${cheap}; key=k`), /main 只支持 http\/https/],
+  ];
+  const before = upstreamEvents.length;
+  for (const [headers, re] of cases) {
+    const r = await send({ headers, body: modelBody("claude-sonnet-5") });
+    assert.equal(r.status, 400, String(re));
+    assert.match(r.json.error.message, re);
+    assert.doesNotMatch(r.json.error.message, /SECRET/);
+  }
+  assert.equal(upstreamEvents.length, before);
+});
+
+test("配置错误：缺少全部配置时列出缺少的项", async () => {
+  const r = await send({ headers: { "content-type": "application/json" }, body: modelBody("claude-sonnet-5") });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error.message, /x-router 缺少配置 main、cheap、key/);
+});
+
+test("配置错误：旧的 x-router-* 写法给出迁移提示", async () => {
+  const old = {
+    "x-router-main-url": `http://127.0.0.1:${upPort}/main`,
+    "x-router-cheap-url": `http://127.0.0.1:${upPort}/cheap`,
+    "x-router-cheap-key": "SECRET",
+  };
+  for (const headers of [old, routerHeaders({}, { "x-router-cheap-auth": "bearer" })]) {
+    const r = await send({ headers, body: modelBody("claude-sonnet-5") });
+    assert.equal(r.status, 400);
+    assert.match(r.json.error.message, /不再支持 x-router-\S+ 等独立请求头，请改用单个请求头 x-router: main=\.\.\.; cheap=\.\.\.; key=\.\.\./);
+    assert.doesNotMatch(r.json.error.message, /SECRET/);
+  }
 });
 
 // ---------- 取消与上游错误的日志 ----------
@@ -272,7 +391,7 @@ test("上游不可达：返回 502 并记录「上游错误」", async () => {
   const deadPort = await freePort();
   const r = await send({
     path: "/case4",
-    headers: routerHeaders({ "x-router-main-url": `http://127.0.0.1:${deadPort}` }),
+    headers: routerHeaders({ main: `http://127.0.0.1:${deadPort}` }),
     body: modelBody("m-unreachable"),
   });
   assert.equal(r.status, 502);

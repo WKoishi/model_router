@@ -2,7 +2,7 @@
 // cc-router：按请求体中的 model 字段，把 Claude Code 的 API 请求分流到两个上游。
 //
 // 本程序不保存任何上游地址或密钥。所有配置由 Claude Code 通过
-// ANTHROPIC_CUSTOM_HEADERS 以 x-router-* 请求头传入，转发前全部剥离。
+// ANTHROPIC_CUSTOM_HEADERS 以 x-router 请求头传入，转发前剥离。
 // 除必要的鉴权替换外，请求与响应（头与体）均原样透传，不解压、不重新编码。
 
 import http from "node:http";
@@ -54,15 +54,53 @@ function copyHeaders(rawHeaders, skip) {
   return out;
 }
 
+// x-router 头中可用的配置项（名称=值，各项用 ; 分隔）
+const FIELDS = ["main", "cheap", "key", "auth", "match", "model"];
+const REQUIRED = ["main", "cheap", "key"];
+// 某项的值里又出现了「名称=」：多半是用了 , 或空格而不是 ; 来分隔
+const MIXED_ITEM = new RegExp(`[\\s,]\\s*(?:${FIELDS.join("|")})\\s*=`, "i");
+
+// 解析 x-router: main=...; cheap=...; key=...
+// 顺带识别 settings.json 的常见写错。错误信息只报告项名，不回显值，避免把 key 打印出来。
+function readConfig(rawHeaders) {
+  const cfg = {};
+  for (let i = 0; i < rawHeaders.length; i += 2) {
+    const name = rawHeaders[i].toLowerCase();
+    const value = rawHeaders[i + 1];
+    if (name.startsWith("x-router-")) {
+      throw new Error(`不再支持 ${rawHeaders[i]} 等独立请求头，请改用单个请求头 x-router: main=...; cheap=...; key=...`);
+    }
+    if (name !== "x-router") continue;
+    if (value.includes("\\n")) {
+      throw new Error("x-router 的值中含有 \\n：各项之间用 ; 分隔即可，不需要换行");
+    }
+    value.split(";").map((s) => s.trim()).filter(Boolean).forEach((item, n) => {
+      const eq = item.indexOf("=");
+      if (eq < 0) throw new Error(`x-router 的第 ${n + 1} 项缺少 =，应为 名称=值`);
+      const field = item.slice(0, eq).trim().toLowerCase();
+      const val = item.slice(eq + 1).trim();
+      if (!FIELDS.includes(field)) {
+        throw new Error(`x-router 中有无法识别的项「${field}」，可用：${FIELDS.join(" / ")}`);
+      }
+      if (MIXED_ITEM.test(val)) {
+        throw new Error(`x-router 的 ${field} 的值中混入了其他配置项：各项之间要用 ; 分隔`);
+      }
+      if (Object.hasOwn(cfg, field)) throw new Error(`x-router 中 ${field} 重复配置`);
+      cfg[field] = val;
+    });
+  }
+  return cfg;
+}
+
 function parseUrl(value, name) {
   let url;
   try {
     url = new URL(value);
   } catch {
-    throw new Error(`${name} 不是合法的 URL：${value}`);
+    throw new Error(`${name} 不是合法的 URL，需以 https:// 或 http:// 开头`);
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error(`${name} 只支持 http/https：${value}`);
+    throw new Error(`${name} 只支持 http/https`);
   }
   return url;
 }
@@ -76,20 +114,21 @@ async function handle(req, res) {
     return fail(res, 403, `拒绝非本机 Host：${h.host || "(空)"}`);
   }
 
-  if (!h["x-router-main-url"] || !h["x-router-cheap-url"] || !h["x-router-cheap-key"]) {
-    return fail(res, 400,
-      "缺少 x-router-main-url / x-router-cheap-url / x-router-cheap-key 请求头，" +
-      "请检查 ~/.claude/settings.json 中的 ANTHROPIC_CUSTOM_HEADERS");
-  }
-
-  let mainUrl, cheapUrl, matchRe;
-  const cheapAuth = (h["x-router-cheap-auth"] || "").toLowerCase();
+  let cfg, mainUrl, cheapUrl, matchRe, cheapAuth;
   try {
-    mainUrl = parseUrl(h["x-router-main-url"], "x-router-main-url");
-    cheapUrl = parseUrl(h["x-router-cheap-url"], "x-router-cheap-url");
-    matchRe = new RegExp(h["x-router-cheap-match"] || DEFAULT_MATCH);
+    cfg = readConfig(req.rawHeaders);
+    const missing = REQUIRED.filter((f) => !cfg[f]);
+    if (missing.length > 0) {
+      throw new Error(
+        `x-router 缺少配置 ${missing.join("、")}，` +
+        "请检查 ~/.claude/settings.json 中的 ANTHROPIC_CUSTOM_HEADERS");
+    }
+    mainUrl = parseUrl(cfg.main, "main");
+    cheapUrl = parseUrl(cfg.cheap, "cheap");
+    matchRe = new RegExp(cfg.match || DEFAULT_MATCH);
+    cheapAuth = (cfg.auth || "").toLowerCase();
     if (cheapAuth && cheapAuth !== "bearer" && cheapAuth !== "x-api-key") {
-      throw new Error(`x-router-cheap-auth 只能是 bearer 或 x-api-key：${h["x-router-cheap-auth"]}`);
+      throw new Error(`auth 只能是 bearer 或 x-api-key：${cfg.auth}`);
     }
   } catch (e) {
     return fail(res, 400, e.message);
@@ -114,17 +153,17 @@ async function handle(req, res) {
   const headers = copyHeaders(req.rawHeaders, (name) =>
     name === "host" ||
     name === "content-length" ||
-    name.startsWith("x-router-") ||
+    name === "x-router" ||
     HOP_BY_HOP.has(name) ||
     (toCheap && (name === "authorization" || name === "x-api-key")));
 
   if (toCheap) {
-    // 鉴权方式默认与 Claude Code 发来的一致，可用 x-router-cheap-auth 覆盖
+    // 鉴权方式默认与 Claude Code 发来的一致，可用 auth 项覆盖
     const style = cheapAuth || ("authorization" in h ? "bearer" : "x-api-key");
-    if (style === "bearer") headers["authorization"] = `Bearer ${h["x-router-cheap-key"]}`;
-    else headers["x-api-key"] = h["x-router-cheap-key"];
+    if (style === "bearer") headers["authorization"] = `Bearer ${cfg.key}`;
+    else headers["x-api-key"] = cfg.key;
 
-    const rewrite = h["x-router-cheap-model"];
+    const rewrite = cfg.model;
     if (rewrite && json) {
       json.model = rewrite;
       body = Buffer.from(JSON.stringify(json));

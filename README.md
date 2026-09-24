@@ -1,1 +1,118 @@
 # model_router
+
+一个零依赖的本地转发代理：按请求中的模型名，把 Claude Code 的 API 请求分流到两个不同的上游。
+
+典型用途：Claude Code 在 auto 模式下会调用 Sonnet 5 做安全检查（classifier），调用量不小。
+用本代理可以把 Sonnet 5 的请求单独发往更便宜的上游，其余请求仍走原来的上游。
+
+```
+Claude Code ──► http://127.0.0.1:4000 (cc-router)
+                   ├─ model 匹配 sonnet-5 ──► 上游 B（cheap）
+                   └─ 其他                ──► 上游 A（main）
+```
+
+## 特点
+
+- **不保存任何密钥或地址**：所有配置都写在 `~/.claude/settings.json`，由 Claude Code 以请求头形式传给代理，本仓库不含任何隐私信息。
+- **原样转发**：请求体逐字节透传（thinking 签名、`cache_control` 等不受影响）；请求头保留原始大小写与顺序；响应不解压、不重新编码，流式输出（SSE）实时转发。
+- **仅监听 `127.0.0.1`**：局域网内其他机器无法访问。
+- 所有 `x-router-*` 配置头在转发前剥离，不会泄露给任何上游。
+
+## 环境要求
+
+Node.js ≥ 18，无需 `npm install`。
+
+```bash
+node -v
+```
+
+## 配置
+
+编辑 `~/.claude/settings.json`（注意：这是本机的私有文件，**不要**把它复制进本仓库）：
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:4000",
+    "ANTHROPIC_AUTH_TOKEN": "<上游 A 的 key>",
+    "ANTHROPIC_CUSTOM_HEADERS": "x-router-main-url: https://<上游 A 地址>\nx-router-cheap-url: https://<上游 B 地址>\nx-router-cheap-key: <上游 B 的 key>"
+  }
+}
+```
+
+- 上游 A 的 key 照常用 `ANTHROPIC_AUTH_TOKEN`（`Authorization: Bearer`）或 `ANTHROPIC_API_KEY`（`x-api-key`）设置，代理原样转发给上游 A。
+- `ANTHROPIC_CUSTOM_HEADERS` 中多个请求头用 `\n` 分隔。
+
+可用的请求头：
+
+| 请求头 | 必填 | 说明 |
+|---|---|---|
+| `x-router-main-url` | 是 | 上游 A 的基础地址，如 `https://api.anthropic.com` |
+| `x-router-cheap-url` | 是 | 上游 B 的基础地址 |
+| `x-router-cheap-key` | 是 | 上游 B 的 API key |
+| `x-router-cheap-auth` | 否 | 上游 B 的鉴权方式：`bearer` 或 `x-api-key`。默认与 Claude Code 发给上游 A 的方式相同 |
+| `x-router-cheap-match` | 否 | 匹配模型名的正则，默认 `sonnet-5` |
+| `x-router-cheap-model` | 否 | 发往上游 B 时把 `model` 改写成此值（上游 B 对模型的命名不同时使用）。设置后请求体会被重新序列化，不再逐字节透传 |
+
+修改 settings.json 后需要重启 Claude Code 才会生效。
+
+## 运行
+
+### 手动运行（试用）
+
+```bash
+node cc-router.mjs
+```
+
+终端需保持打开，每个请求的去向会打印在这里，`Ctrl+C` 停止。可用环境变量 `PORT` 修改端口（默认 4000）。
+
+### systemd 用户服务（长期使用）
+
+1. 编辑 `cc-router.service`，把 `ExecStart` 中的两个路径换成本机实际路径（`which node` 查看 node 路径）。
+2. 安装并启动：
+
+   ```bash
+   mkdir -p ~/.config/systemd/user
+   cp cc-router.service ~/.config/systemd/user/
+   systemctl --user daemon-reload
+   systemctl --user enable --now cc-router
+   ```
+
+3. 常用命令：
+
+   ```bash
+   systemctl --user status cc-router     # 查看状态
+   systemctl --user restart cc-router    # 重启
+   journalctl --user -u cc-router -f     # 查看实时日志
+   ```
+
+> 使用 nvm 安装的 Node 升级版本后路径会变化，需要同步修改 `~/.config/systemd/user/cc-router.service` 并执行 `systemctl --user daemon-reload`。
+
+## 验证
+
+正常使用 Claude Code，观察日志：
+
+```
+2026-09-24T13:21:39.442Z POST /v1/messages model=claude-opus-5-5 -> main 200 7ms
+2026-09-24T13:21:39.450Z POST /v1/messages model=claude-sonnet-5 -> cheap 200 1ms
+```
+
+日志只记录方法、路径、模型名、去向、状态码和耗时，不记录任何 key 或请求内容。
+
+## 故障排查
+
+| 现象 | 原因 |
+|---|---|
+| Claude Code 报连接失败 | 代理没有运行，检查 `systemctl --user status cc-router` |
+| 返回 `[cc-router] 缺少 x-router-...` | `ANTHROPIC_CUSTOM_HEADERS` 没配置或没生效（改完需重启 Claude Code） |
+| 返回 `[cc-router] ... 不是合法的 URL` | 地址写错，需带 `https://` 前缀 |
+| 返回 `[cc-router] 上游（main/cheap）请求失败` | 对应上游网络不通或地址错误 |
+| 上游返回 401 | 对应上游的 key 错误，或鉴权方式不对（可设置 `x-router-cheap-auth`） |
+
+## 停用
+
+从 `~/.claude/settings.json` 中删除 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_CUSTOM_HEADERS`（并把 key 改回直连上游所需的设置），重启 Claude Code，然后：
+
+```bash
+systemctl --user disable --now cc-router
+```

@@ -1,0 +1,13 @@
+[Unit]
+Description=cc-router - Claude Code 模型分流代理
+After=network-online.target
+
+[Service]
+# 将两个路径替换为本机实际路径（node 路径可用 `which node` 查看）
+ExecStart=/path/to/node /path/to/model_router/cc-router.mjs
+Environment=PORT=4000
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

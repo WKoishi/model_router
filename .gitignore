@@ -1,0 +1,8 @@
+# 密钥与本地配置一律不入库
+.env
+.env.*
+settings.json
+settings.local.json
+
+*.log
+node_modules/

@@ -45,6 +45,7 @@ node -v
 }
 ```
 
+- `ANTHROPIC_BASE_URL` 请写 `127.0.0.1`，不要写 `localhost`：`localhost` 可能被解析成 IPv6 的 `::1`，而代理只监听 IPv4。
 - 上游 A 的 key 照常用 `ANTHROPIC_AUTH_TOKEN`（`Authorization: Bearer`）或 `ANTHROPIC_API_KEY`（`x-api-key`）设置，代理原样转发给上游 A。
 - 所有配置写在一个 `x-router` 请求头里，格式为 `名称=值`，各项用 `;` 分隔，前后空格随意，名称不区分大小写。
 - 字符串必须写在一行内：JSON 字符串里不能直接回车换行。
@@ -78,7 +79,7 @@ node -v
 node cc-router.mjs
 ```
 
-终端需保持打开，每个请求的去向会打印在这里，`Ctrl+C` 停止。可用环境变量 `PORT` 修改端口（默认 4000）。
+终端需保持打开，每个请求的去向会打印在这里，`Ctrl+C` 停止。可用环境变量 `PORT` 修改端口（默认 4000）；监听地址固定为 `127.0.0.1`，不可修改。
 
 ### systemd 用户服务（长期使用）
 
@@ -107,9 +108,9 @@ node cc-router.mjs
 正常使用 Claude Code，观察日志：
 
 ```
-2026-09-24T13:21:39.442Z POST /v1/messages model=claude-opus-5-5 -> main 200 7ms
-2026-09-24T13:21:39.450Z POST /v1/messages model=claude-sonnet-5 -> cheap 200 1ms
-2026-09-24T13:21:41.013Z POST /v1/messages model=claude-opus-5-5 -> main 客户端已取消 1571ms
+2026-09-24T13:21:39.442Z POST /v1/messages?beta=true model=claude-opus-5-5 -> main 200 7ms
+2026-09-24T13:21:39.450Z POST /v1/messages?beta=true model=claude-sonnet-5 -> cheap 200 1ms
+2026-09-24T13:21:41.013Z POST /v1/messages?beta=true model=claude-opus-5-5 -> main 客户端已取消 1571ms
 ```
 
 在 Claude Code 中按 Esc 中断请求时会记录「客户端已取消」，同时取消对应的上游请求，这不是错误。
@@ -128,7 +129,7 @@ node --test          # Node 20 使用：node --test test/
 
 | 现象 | 原因 |
 |---|---|
-| Claude Code 报连接失败 | 代理没有运行，检查 `systemctl --user status cc-router` |
+| Claude Code 报连接失败 | 代理没有运行，检查 `systemctl --user status cc-router`；或 `ANTHROPIC_BASE_URL` 写成了 `localhost`（可能被解析成 `::1`），应改为 `http://127.0.0.1:4000` |
 | 返回 `[cc-router] x-router 缺少配置 ...` | `ANTHROPIC_CUSTOM_HEADERS` 没配置、漏了某一项，或没生效（改完需重启 Claude Code） |
 | 返回 `[cc-router] 不再支持 x-router-... 等独立请求头` | 还在用旧写法，按上文改成单个 `x-router` 头 |
 | 返回 `[cc-router] ... 混入了其他配置项` / `含有 \n` | 各项之间用了 `,`、空格或 `\n` 分隔，应改用 `;` |
@@ -136,7 +137,7 @@ node --test          # Node 20 使用：node --test test/
 | 返回 `[cc-router] ... 不是合法的 URL` | 地址写错，需带 `https://` 前缀 |
 | 返回 `[cc-router] ... 只填基础地址，不要带参数` | 地址里带了 `?` 或 `#`，删掉它们及之后的部分 |
 | 返回 `[cc-router] auth 只能是 ...` | 鉴权方式写错，只能是 `bearer` 或 `x-api-key` |
-| 返回 403 `[cc-router] 拒绝非本机 Host` | `ANTHROPIC_BASE_URL` 没用本机地址，应为 `http://127.0.0.1:4000` 或 `http://localhost:4000` |
+| 返回 403 `[cc-router] 拒绝非本机 Host` | `ANTHROPIC_BASE_URL` 没用本机地址，应为 `http://127.0.0.1:4000` |
 | 返回 `[cc-router] 上游（main/cheap）请求失败` | 对应上游网络不通或地址错误 |
 | 上游返回 401 | 对应上游的 key 错误，或鉴权方式不对（可设置 `auth` 项） |
 

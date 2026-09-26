@@ -52,7 +52,8 @@ function startUpstream() {
 
 function startRouter() {
   router = spawn(process.execPath, [ROUTER], {
-    env: { ...process.env, PORT: String(routerPort), HOST: "127.0.0.1" },
+    // 故意设置 HOST：代理应忽略它，仍只监听 127.0.0.1
+    env: { ...process.env, PORT: String(routerPort), HOST: "0.0.0.0" },
   });
   router.stdout.on("data", (d) => { logs += d; });
   router.stderr.on("data", (d) => { logs += d; });
@@ -69,6 +70,15 @@ async function waitForLog(re, timeout = 3000) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 尝试建立 TCP 连接，返回是否连得上
+function canConnect(host, port) {
+  return new Promise((resolve) => {
+    const s = net.connect({ host, port });
+    s.on("connect", () => { s.destroy(); resolve(true); });
+    s.on("error", () => resolve(false));
+  });
+}
 
 // 构造 x-router 头的值；opts 覆盖默认配置项，值为 undefined 的项不写入
 function routerValue(opts = {}) {
@@ -132,6 +142,19 @@ after(() => {
   upstream.closeAllConnections();
 });
 
+// ---------- 监听地址 ----------
+
+test("监听：只监听 127.0.0.1，不受环境变量 HOST 影响", async () => {
+  assert.match(logs, new RegExp(`已启动：http://127\\.0\\.0\\.1:${routerPort}`));
+  assert.equal(await canConnect("127.0.0.1", routerPort), true);
+  // localhost 被解析成 ::1 时连不上，所以 README 只推荐 127.0.0.1
+  assert.equal(await canConnect("::1", routerPort), false);
+  if (process.platform === "linux") {
+    // Linux 上整个 127.0.0.0/8 都是回环地址：若误监听 0.0.0.0，这里就能连上
+    assert.equal(await canConnect("127.0.0.2", routerPort), false);
+  }
+});
+
 // ---------- Host 校验 ----------
 
 test("Host：本机地址均被接受（带/不带端口、大小写、IPv6）", async () => {
@@ -172,6 +195,12 @@ test("分流：sonnet-5 走 cheap，其余走 main，非 JSON 走 main", async (
   r = await send({ body: "not json" });
   assert.equal(r.json.url, "/main/v1/messages");
   assert.equal(r.json.body, "not json");
+});
+
+test("查询参数：原样转发，日志格式与 README 示例一致", async () => {
+  const r = await send({ path: "/v1/messages?beta=true", body: modelBody("claude-sonnet-5") });
+  assert.equal(r.json.url, "/cheap/v1/messages?beta=true");
+  await waitForLog(/^\S+Z POST \/v1\/messages\?beta=true model=claude-sonnet-5 -> cheap 200 \d+ms$/m);
 });
 
 test("头处理：x-router 被剥离，两个上游的 key 互不泄露", async () => {

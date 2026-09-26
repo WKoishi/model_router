@@ -9,12 +9,13 @@ import http from "node:http";
 import https from "node:https";
 import { pipeline } from "node:stream";
 
-const HOST = process.env.HOST || "127.0.0.1";
+// 监听地址固定为本机回环地址，不读环境变量，避免被常见的 HOST 变量意外改成其他地址
+const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT) || 4000;
 const DEFAULT_MATCH = "sonnet-5";
 
 // 只接受以本机地址访问的请求，防止 DNS rebinding 让外部网页借用本代理
-const ALLOWED_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", HOST.toLowerCase()]);
+const ALLOWED_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
 // 逐跳头只对当前这一段连接有意义，不能转发
 const HOP_BY_HOP = new Set([

@@ -102,6 +102,10 @@ function parseUrl(value, name) {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error(`${name} 只支持 http/https`);
   }
+  // 请求路径是直接拼在地址后面的，带 ? 或 # 会把路径拼进参数里
+  if (/[?#]/.test(url.href)) {
+    throw new Error(`${name} 只填基础地址，不要带参数（地址中不能有 ? 或 #）`);
+  }
   return url;
 }
 

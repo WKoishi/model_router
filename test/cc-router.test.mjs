@@ -253,7 +253,7 @@ test("格式：容忍多余空格、空项、末尾分号和名称大小写", as
   assert.equal(r.json.headers["x-api-key"], "CHEAPKEY");
 });
 
-test("格式：值中的 =、: 以及地址里的 x-router、?key= 字样不影响解析", async () => {
+test("格式：值中的 =、: 以及地址里的 x-router 字样不影响解析", async () => {
   let r = await send({ headers: routerHeaders({ key: "K=E=Y" }), body: modelBody("claude-sonnet-5") });
   assert.equal(r.json.headers.authorization, "Bearer K=E=Y");
 
@@ -263,12 +263,6 @@ test("格式：值中的 =、: 以及地址里的 x-router、?key= 字样不影�
   });
   assert.equal(r.status, 200);
   assert.equal(r.json.url, "/x-router-a:b/v1/messages");
-
-  r = await send({
-    headers: routerHeaders({ main: `http://127.0.0.1:${upPort}/main?key=1&auth=2` }),
-    body: modelBody("claude-opus-5-5"),
-  });
-  assert.equal(r.status, 200);
 });
 
 test("格式：配置可拆到多个 x-router 头中", async () => {
@@ -305,6 +299,10 @@ test("配置错误：返回 400 并指明原因，不访问上游，且错误信
     // 地址写错（错误信息不回显值）
     [rawRouterHeaders(`main=SECRET; ${cheap}; key=k`), /main 不是合法的 URL/],
     [rawRouterHeaders(`main=ftp://SECRET; ${cheap}; key=k`), /main 只支持 http\/https/],
+    // 地址带参数（? 或 #，包括后面为空的情况）
+    [rawRouterHeaders(`main=http://127.0.0.1:${upPort}/main?key=SECRET&auth=2; ${cheap}; key=k`), /main 只填基础地址，不要带参数/],
+    [rawRouterHeaders(`${main}; cheap=http://127.0.0.1:${upPort}/cheap#SECRET; key=k`), /cheap 只填基础地址，不要带参数/],
+    [rawRouterHeaders(`main=http://127.0.0.1:${upPort}/SECRET?; ${cheap}; key=k`), /main 只填基础地址，不要带参数/],
   ];
   const before = upstreamEvents.length;
   for (const [headers, re] of cases) {

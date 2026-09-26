@@ -25,7 +25,7 @@ Claude Code ──► http://127.0.0.1:4000 (cc-router)
 
 ## 环境要求
 
-Node.js ≥ 18，无需 `npm install`。
+Node.js ≥ 20，无需 `npm install`。
 
 ```bash
 node -v
@@ -118,7 +118,7 @@ node cc-router.mjs
 ## 测试
 
 ```bash
-node --test          # Node 18/20 使用：node --test test/
+node --test          # Node 20 使用：node --test test/
 ```
 
 测试会在随机端口启动代理和一个本地假上游，不访问任何真实上游，也不需要任何 key。

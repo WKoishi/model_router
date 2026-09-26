@@ -1,5 +1,5 @@
 // cc-router 集成测试：启动真实的 cc-router 子进程和一个本地假上游，端到端验证行为。
-// 运行：node --test（Node ≥ 22 自动发现；Node 18/20 用 node --test test/）
+// 运行：node --test（Node ≥ 22 自动发现；Node 20 用 node --test test/）
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -407,6 +407,24 @@ test("正常完成的请求不记录「客户端已取消」", async () => {
   assert.equal(r.body, "data: 1\n\ndata: 2\n\n");
   await sleep(100);
   assert.doesNotMatch(logs, /case5.*客户端已取消/);
+});
+
+test("取消：请求体未收完就断开，记录「客户端已取消」且不访问上游", async () => {
+  const before = upstreamEvents.length;
+  await new Promise((resolve) => {
+    const req = http.request({
+      host: "127.0.0.1", port: routerPort, path: "/case6/upload", method: "POST",
+      headers: { ...routerHeaders(), "content-length": "100000" },
+    });
+    req.on("error", () => {});
+    req.on("close", resolve);
+    req.write('{"model":');
+    setTimeout(() => req.destroy(), 100);
+  });
+  await waitForLog(/POST \/case6\/upload 客户端已取消 \d+ms/);
+  await sleep(100);
+  assert.doesNotMatch(logs, /内部错误/);
+  assert.equal(upstreamEvents.length, before);
 });
 
 test("所有用例后代理仍在运行且无内部错误", async () => {

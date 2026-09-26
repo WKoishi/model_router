@@ -134,7 +134,29 @@ async function handle(req, res) {
     return fail(res, 400, e.message);
   }
 
-  let body = await readBody(req);
+  const tag = [req.method, req.url];
+  let upReq = null;
+  let clientGone = false;
+  let upstreamFailed = false;
+
+  // Claude Code 中途断开时（包括请求体还没收完时），同时取消上游请求
+  res.on("close", () => {
+    if (res.writableFinished || upstreamFailed) return;
+    clientGone = true;
+    log(...tag, "客户端已取消", `${Date.now() - started}ms`);
+    upReq?.destroy();
+  });
+
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (err) {
+    // 请求体没收完就断开了，已在 close 中记录
+    if (err.code === "ECONNRESET") return;
+    throw err;
+  }
+  if (clientGone) return;
+
   let json = null;
   let model = "";
   if (body.length > 0) {
@@ -175,11 +197,9 @@ async function handle(req, res) {
   const target = new URL(base.href.replace(/\/+$/, "") + req.url);
   const client = target.protocol === "https:" ? https : http;
 
-  const tag = [req.method, req.url, `model=${model || "-"}`, `-> ${route}`];
-  let clientGone = false;
-  let upstreamFailed = false;
+  tag.push(`model=${model || "-"}`, `-> ${route}`);
 
-  const upReq = client.request(target, { method: req.method, headers }, (upRes) => {
+  upReq = client.request(target, { method: req.method, headers }, (upRes) => {
     const outHeaders = copyHeaders(upRes.rawHeaders, (name) => HOP_BY_HOP.has(name));
     res.writeHead(upRes.statusCode, upRes.statusMessage, outHeaders);
     log(...tag, upRes.statusCode, `${Date.now() - started}ms`);
@@ -196,14 +216,6 @@ async function handle(req, res) {
     if (clientGone) return;
     log(...tag, "上游错误:", err.message);
     fail(res, 502, `上游（${route}）请求失败：${err.message}`);
-  });
-
-  // Claude Code 中途断开时，同时取消上游请求
-  res.on("close", () => {
-    if (res.writableFinished || upstreamFailed) return;
-    clientGone = true;
-    log(...tag, "客户端已取消", `${Date.now() - started}ms`);
-    upReq.destroy();
   });
 
   upReq.end(body);

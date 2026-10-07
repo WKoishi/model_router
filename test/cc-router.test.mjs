@@ -233,6 +233,19 @@ test("match 项：自定义匹配规则", async () => {
   assert.equal(r.json.url, "/main/v1/messages");
 });
 
+test("match 项：默认规则也命中 sonnet-5-5，README 示例可将其排除", async () => {
+  let r = await send({ body: modelBody("claude-sonnet-5-5") });
+  assert.equal(r.json.url, "/cheap/v1/messages");
+
+  const headers = routerHeaders({ match: "sonnet-5(?!-5)" });
+  r = await send({ headers, body: modelBody("claude-sonnet-5-5") });
+  assert.equal(r.json.url, "/main/v1/messages");
+  r = await send({ headers, body: modelBody("claude-sonnet-5") });
+  assert.equal(r.json.url, "/cheap/v1/messages");
+  r = await send({ headers, body: modelBody("claude-sonnet-5-20260101") });
+  assert.equal(r.json.url, "/cheap/v1/messages");
+});
+
 // ---------- auth 项 ----------
 
 test("auth：未设置时沿用 Claude Code 的鉴权方式", async () => {

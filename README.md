@@ -5,7 +5,7 @@
 典型用途：Claude Code 在 auto 模式下会调用 Sonnet 5 做安全检查（classifier），调用量不小。
 用本代理可以把 Sonnet 5 的请求单独发往更便宜的上游，其余请求仍走原来的上游。
 
-> 注意：分流只看模型名，默认会把**所有** Sonnet 5 请求发往上游 B，而不只是安全检查。
+> 注意：分流只看模型名，默认会把**所有** Sonnet 5 请求（包括 Sonnet 5.5）发往上游 B，而不只是安全检查。
 > 如果主会话切换到 Sonnet 5（如 `/model sonnet`）或子代理使用 Sonnet 5，这些请求同样会走上游 B。
 > 可以用 `match` 项调整匹配规则。
 
@@ -60,7 +60,7 @@ node -v
 | `cheap` | 是 | 上游 B 的基础地址 |
 | `key` | 是 | 上游 B 的 API key |
 | `auth` | 否 | 上游 B 的鉴权方式：`bearer` 或 `x-api-key`（不区分大小写，其他值会报错）。默认与 Claude Code 发给上游 A 的方式相同 |
-| `match` | 否 | 匹配模型名的正则，默认 `sonnet-5` |
+| `match` | 否 | 匹配模型名的正则，默认 `sonnet-5`。模型名中只要有一部分匹配即命中（区分大小写），不要求整个模型名相同，因此默认值也会命中 `claude-sonnet-5-5` |
 | `model` | 否 | 发往上游 B 时把 `model` 改写成此值（上游 B 对模型的命名不同时使用）。设置后请求体会被重新序列化，不再逐字节透传 |
 
 例如需要指定鉴权方式并改写模型名：
@@ -68,6 +68,14 @@ node -v
 ```json
 "ANTHROPIC_CUSTOM_HEADERS": "x-router: main=https://<上游 A 地址>; cheap=https://<上游 B 地址>; key=<上游 B 的 key>; auth=x-api-key; model=<上游 B 的模型名>"
 ```
+
+如果只想让 Sonnet 5 走上游 B、Sonnet 5.5 仍走上游 A：
+
+```json
+"ANTHROPIC_CUSTOM_HEADERS": "x-router: main=https://<上游 A 地址>; cheap=https://<上游 B 地址>; key=<上游 B 的 key>; match=sonnet-5(?!-5)"
+```
+
+`(?!-5)` 表示 `sonnet-5` 后面不能紧跟 `-5`，带日期后缀的 Sonnet 5 模型名仍能命中。不建议写成 `sonnet-5$`，模型名带日期后缀时会匹配不到。
 
 修改 settings.json 后需要重启 Claude Code 才会生效。
 

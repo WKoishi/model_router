@@ -79,6 +79,34 @@ node -v
 
 修改 settings.json 后需要重启 Claude Code 才会生效。
 
+### 可选：使用 1 小时缓存
+
+Claude Code 只在使用 Claude 订阅且未超出套餐额度时，才默认为主会话请求 1 小时的提示缓存；按上文用 API key 鉴权时，所有请求默认都是 5 分钟。如需 1 小时，在 `env` 中再加一项：
+
+```json
+"CLAUDE_CODE_PROMPT_CACHE_TTL": "1h"
+```
+
+| 环境变量 | 作用范围 |
+|---|---|
+| `CLAUDE_CODE_PROMPT_CACHE_TTL=1h` | 主会话（交互轮次、`-p` 运行） |
+| `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL=1h` | 其他请求：子代理、compaction、会话标题等 |
+| `ENABLE_PROMPT_CACHING_1H=1` | 两类都用 1 小时（优先级最低，会被上面两项及对应的 settings 设置覆盖） |
+
+- 需要 Claude Code v2.1.242 及以上，修改后同样需要重启 Claude Code。
+- 也可以不用环境变量，在 settings.json 顶层写 `"promptCacheTtl": "1h"`（主会话）或 `"subagentPromptCacheTtl": "1h"`（其他请求）；同时设置时环境变量优先。
+- 若设置了 `FORCE_PROMPT_CACHING_5M=1`，它会覆盖以上所有设置。
+- 1 小时缓存的写入单价比 5 分钟高。如果两次请求的间隔很少超过 5 分钟，开启后只会多付写入费用；经常停顿 5 分钟以上再继续时才划算。子代理等请求通常持续时间短，一般只需为主会话开启。
+- 代理不需要额外配置：1 小时缓存依赖的 `anthropic-beta` 请求头会原样转发，请求体中的 `cache_control` 也不受影响（设置了 `model` 项时请求体会重新序列化，但 `cache_control` 照样保留）。但上游本身必须支持 1 小时缓存，部分第三方中转可能会丢弃相关请求头或参数。
+
+验证是否生效：
+
+```bash
+claude -p "hello" --output-format json
+```
+
+查看结果中的 `usage.cache_creation`：缓存写入记在 `ephemeral_1h_input_tokens` 下即为生效，仍记在 `ephemeral_5m_input_tokens` 下则说明设置未生效或上游不支持。如果两项都是 0，可能是这次请求完全命中了已有缓存，换一句提示再试即可。
+
 ## 运行
 
 ### 手动运行（试用）

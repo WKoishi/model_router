@@ -161,6 +161,16 @@ node --test          # Node 20 使用：node --test test/
 
 测试会在随机端口启动代理和一个本地假上游，不访问任何真实上游，也不需要任何 key。
 
+### 压力测试
+
+验证超长上下文（约 70 万～100 万 token、最大约 28MB 的请求体）和超长思考链（持续 5 分钟以上、中途长时间静默的 SSE 流）下能否正常转发，并输出代理增加的耗时、内存占用和事件延迟。假上游改用 HTTPS（需要 `openssl` 生成临时自签证书），完整运行约 6 分钟，因此不包含在上面的 `node --test` 中：
+
+```bash
+node --test stress/cc-router.stress.mjs
+```
+
+调试脚本本身时可用 `STRESS_STREAM_SECONDS`（默认 330）和 `STRESS_TTFB_SECONDS`（默认 120）缩短时长。
+
 ## 故障排查
 
 | 现象 | 原因 |

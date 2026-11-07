@@ -46,7 +46,12 @@ node -v
 }
 ```
 
-- `CLAUDE_CODE_AUTO_MODE_SERVER=0` 让 auto 模式的安全检查由 Claude Code 自己以 Sonnet 5 请求发出，这样才会被分流到上游 B。不设置时，Claude Code 经过自定义 `ANTHROPIC_BASE_URL` 默认改为请求服务端审查（v2.1.278 起），不再单独调用 Sonnet 5，上游 B 收不到安全检查请求。如果上游不支持服务端审查，v2.1.319 起 auto 模式不再退回本地检查，需要检查的操作会被询问或直接拒绝（提示 `Auto mode is unavailable`）。官方说明这个变量是临时设置，以后的版本可能移除。
+- `CLAUDE_CODE_AUTO_MODE_SERVER=0` 让 auto 模式的安全检查始终由 Claude Code 自己以 Sonnet 5 请求发出，这样才会被分流到上游 B。不设置时，Claude Code 会先请求服务端审查（v2.1.278 起）：
+  - v2.1.319 之前：上游不支持服务端审查时，Claude Code 自动退回自己的 Sonnet 5 安全检查，不设置也能分流到上游 B。
+  - v2.1.319 起：不再自动退回，需要检查的操作会被询问或直接拒绝（提示 `Auto mode is unavailable`），必须设置此项。
+  - 上游支持服务端审查时，安全检查在主请求中完成，不单独调用 Sonnet 5，上游 B 收不到安全检查请求。
+
+  官方说明这个变量是临时设置，以后的版本可能移除。
 
 - `ANTHROPIC_BASE_URL` 请写 `127.0.0.1`，不要写 `localhost`：`localhost` 可能被解析成 IPv6 的 `::1`，而代理只监听 IPv4。
 - 上游 A 的 key 照常用 `ANTHROPIC_AUTH_TOKEN`（`Authorization: Bearer`）或 `ANTHROPIC_API_KEY`（`x-api-key`）设置，代理原样转发给上游 A。
@@ -188,8 +193,8 @@ node --test stress/cc-router.stress.mjs
 | 返回 `[cc-router] auth 只能是 ...` | 鉴权方式写错，只能是 `bearer` 或 `x-api-key` |
 | 返回 403 `[cc-router] 拒绝非本机 Host` | `ANTHROPIC_BASE_URL` 没用本机地址，应为 `http://127.0.0.1:4000` |
 | 返回 `[cc-router] 上游（main/cheap）请求失败` | 对应上游网络不通或地址错误 |
-| auto 模式下提示 `Auto mode is unavailable`，操作被拒绝 | 没有设置 `CLAUDE_CODE_AUTO_MODE_SERVER=0`，而上游不支持服务端审查。按上文加上后重启 Claude Code |
-| 日志里没有 `-> cheap` 的安全检查请求 | 同上，未设置 `CLAUDE_CODE_AUTO_MODE_SERVER=0` 时安全检查走服务端，不单独发 Sonnet 5 请求 |
+| auto 模式下提示 `Auto mode is unavailable`，操作被拒绝 | Claude Code v2.1.319 及以上没有设置 `CLAUDE_CODE_AUTO_MODE_SERVER=0`，而上游不支持服务端审查。按上文加上后重启 Claude Code |
+| 日志里没有 `-> cheap` 的安全检查请求 | 没有设置 `CLAUDE_CODE_AUTO_MODE_SERVER=0`，且上游支持服务端审查，安全检查在主请求中完成 |
 | 上游返回 401 | 对应上游的 key 错误，或鉴权方式不对（可设置 `auth` 项） |
 
 ## 停用
